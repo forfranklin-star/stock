@@ -674,9 +674,18 @@ if result:
                         icon = "✅" if s['success'] else "❌"
                         st.markdown(f"- {icon} **{s['source']}**: {s['detail']}")
                 else:
-                    st.info("💡 请检查网络连接，或稍后重试。东方财富直连API为首选数据源（3次自动重试）。")
+                    st.info("💡 资金流已按 东财→雪球(全球CDN)→akshare 三源自动降级。若全部失败，"
+                            "通常是当前网络对国内财经接口访问受限，请稍后重试；K线、技术指标、模型等其他分析不受影响。")
         else:
             st.markdown(f"#### 💹 资金流分析（{cf['flow_count']}个交易日）")
+            # 数据来源与口径（海外环境东财被封时自动切换雪球全球源）
+            fsrc = cf.get('flow_source', '')
+            if fsrc:
+                if '雪球' in fsrc:
+                    st.info(f"📡 数据来源：**{fsrc}**。海外服务器已自动切换至雪球全球节点；"
+                            f"其主力口径(大单阈值)与东财5档不同，且仅提供近20个交易日，分档明细仅最新日可得。")
+                else:
+                    st.caption(f"📡 数据来源：{fsrc}")
             if cf.get('learning_updated'):
                 st.success("🧠 已更新资金流模式学习参数")
 

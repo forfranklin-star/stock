@@ -306,17 +306,31 @@ def analyze_capital_flow_full(code, df_price, start_date, end_date):
         print(f"[资金流] 仓位学习更新失败: {e}")
 
     # 6. 汇总
+    def _safe_num(v):
+        """NaN/None 安全转数值（雪球历史序列无分档明细时返回None，而非nan）"""
+        try:
+            if v is None or (isinstance(v, float) and np.isnan(v)):
+                return None
+            return round(float(v), 2)
+        except Exception:
+            return None
+
+    # 数据来源与口径（东财5档 / 雪球近20交易日）
+    flow_source = '未知'
+    if 'flow_source' in flow_df.columns and len(flow_df):
+        flow_source = str(flow_df['flow_source'].dropna().iloc[-1])
+
     flow_data = []
     for _, row in flow_df.tail(60).iterrows():
         flow_data.append({
             'date': str(row['date'].date()) if hasattr(row['date'], 'date') else str(row['date']),
-            'close': round(row.get('close', 0), 2),
-            'main_net_inflow': round(row.get('main_net_inflow', 0), 2),
-            'main_net_pct': round(row.get('main_net_pct', 0), 4),
-            'super_large_net': round(row.get('super_large_net', 0), 2),
-            'large_net': round(row.get('large_net', 0), 2),
-            'medium_net': round(row.get('medium_net', 0), 2),
-            'small_net': round(row.get('small_net', 0), 2),
+            'close': _safe_num(row.get('close', 0)) or 0,
+            'main_net_inflow': _safe_num(row.get('main_net_inflow', 0)) or 0,
+            'main_net_pct': _safe_num(row.get('main_net_pct', 0)),
+            'super_large_net': _safe_num(row.get('super_large_net', 0)),
+            'large_net': _safe_num(row.get('large_net', 0)),
+            'medium_net': _safe_num(row.get('medium_net', 0)),
+            'small_net': _safe_num(row.get('small_net', 0)),
         })
 
     position_data = []
@@ -353,4 +367,5 @@ def analyze_capital_flow_full(code, df_price, start_date, end_date):
         'learning_updated': pattern_result['learning_updated'],
         'current_position': position_data[-1] if position_data else None,
         'source_status': source_status,
+        'flow_source': flow_source,
     }

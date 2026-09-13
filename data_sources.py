@@ -453,10 +453,147 @@ def _request_mirrors_json(mirrors, path_suffix, protocol='http', timeout=6, roun
     raise last_err if last_err else Exception("所有镜像均失败")
 
 
+# ---------- 雪球资金流（全球CDN，海外/美国服务器可达，作为东财被封时的可靠信源）----------
+import http.cookiejar
+_XQ_STATE = {'opener': None, 'token_time': 0, 'last_req': 0}
+_XQ_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+          '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+_XQ_TOKEN_TTL = 1200      # token 缓存20分钟
+_XQ_MIN_INTERVAL = 0.8    # 两次请求最小间隔（秒），规避限流
+
+
+def _xq_symbol(code):
+    """A股个股代码转雪球代码：沪市(60/68/90及沪基金/债)SH，其余(000/002/300等)SZ。
+    注：资金流仅针对个股；指数(如000001上证指数)无主力资金流概念，故此处000默认按深市个股处理。"""
+    c = str(code).zfill(6)
+    if c.startswith(('60', '68', '90', '11', '13', '50', '51', '56', '58')):
+        return 'SH' + c
+    return 'SZ' + c
+
+
+def _xq_ensure_token(force=False):
+    """获取/复用雪球 cookie token（xq_a_token），带缓存"""
+    now = time.time()
+    if (not force and _XQ_STATE['opener'] is not None
+            and now - _XQ_STATE['token_time'] < _XQ_TOKEN_TTL):
+        return _XQ_STATE['opener']
+    cj = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPCookieProcessor(cj),
+        urllib.request.HTTPSHandler(context=_SSL_CTX))
+    opener.addheaders = [('User-Agent', _XQ_UA), ('Accept-Language', 'zh-CN,zh;q=0.9')]
+    # 访问行情页，Set-Cookie 会下发 xq_a_token
+    opener.open('https://xueqiu.com/hq', timeout=10).read()
+    has_token = any('token' in c.name for c in cj)
+    if not has_token:
+        # 再访问个股页兜底
+        time.sleep(0.6)
+        opener.open('https://xueqiu.com/S/' + _xq_symbol('600118'), timeout=10).read()
+    _XQ_STATE['opener'] = opener
+    _XQ_STATE['token_time'] = now
+    _XQ_STATE['last_req'] = now
+    return opener
+
+
+def _xq_get_json(path, tries=3):
+    """带限速、退避重试、token自动刷新的雪球JSON GET"""
+    last_err = None
+    for i in range(tries):
+        try:
+            # 限速
+            wait = _XQ_MIN_INTERVAL - (time.time() - _XQ_STATE['last_req'])
+            if wait > 0:
+                time.sleep(wait)
+            opener = _xq_ensure_token(force=(i == 1))  # 第2次尝试时强制刷新token
+            req = urllib.request.Request(
+                'https://stock.xueqiu.com' + path,
+                headers={'User-Agent': _XQ_UA, 'Accept': 'application/json',
+                         'Referer': 'https://xueqiu.com/'})
+            _XQ_STATE['last_req'] = time.time()
+            raw = opener.open(req, timeout=10).read()
+            if raw[:2] == b'\x1f\x8b':
+                raw = gzip.decompress(raw)
+            text = raw.decode('utf-8', errors='ignore')
+            # 限流时可能返回空或HTML登录页
+            if not text.strip().startswith('{'):
+                raise ValueError('非JSON响应(可能限流)')
+            data = json.loads(text)
+            if data and data.get('data') is not None:
+                return data['data']
+            raise ValueError('data为空')
+        except Exception as e:
+            last_err = e
+            time.sleep(1.2 * (i + 1))  # 退避
+    raise last_err if last_err else RuntimeError('雪球请求失败')
+
+
+def _fetch_flow_xueqiu(code, start_date, end_date):
+    """
+    雪球资金流（全球CDN，美国服务器可达）。
+    history.json: 最近20个交易日 主力净流入(amount,元) 的日级序列；
+    assort.json : 最新交易日 大/中/小单买卖结构（雪球为3档，无独立超大单）。
+    注意：雪球"主力"口径(大单阈值)与东财5档不同，故用 flow_source 列标注，不与东财混用。
+    """
+    try:
+        sym = _xq_symbol(code)
+        t0 = time.time()
+        hist = _xq_get_json(f'/v5/stock/capital/history.json?symbol={sym}&size=20')
+        items = hist.get('items', []) if hist else []
+        if not items:
+            _record_status('雪球资金流', False, 'history返回空')
+            return pd.DataFrame()
+
+        # 最新交易日的分档结构（可选，失败不影响主序列）
+        breakdown = {}
+        try:
+            time.sleep(_XQ_MIN_INTERVAL)
+            asrt = _xq_get_json(f'/v5/stock/capital/assort.json?symbol={sym}', tries=2)
+            if asrt:
+                bd_date = pd.to_datetime(asrt.get('timestamp'), unit='ms').normalize()
+                breakdown = {
+                    'date': bd_date,
+                    'large_net': (asrt.get('buy_large') or 0) - (asrt.get('sell_large') or 0),
+                    'medium_net': (asrt.get('buy_medium') or 0) - (asrt.get('sell_medium') or 0),
+                    'small_net': (asrt.get('buy_small') or 0) - (asrt.get('sell_small') or 0),
+                }
+        except Exception:
+            breakdown = {}
+
+        records = []
+        for it in items:
+            dt = pd.to_datetime(it.get('timestamp'), unit='ms').normalize()
+            row = {
+                'date': dt,
+                'main_net_inflow': float(it.get('amount') or 0),
+                'small_net': np.nan, 'medium_net': np.nan,
+                'large_net': np.nan, 'super_large_net': np.nan,
+                'main_net_pct': np.nan, 'close': np.nan,
+            }
+            if breakdown and dt == breakdown['date']:
+                row['large_net'] = breakdown['large_net']
+                row['medium_net'] = breakdown['medium_net']
+                row['small_net'] = breakdown['small_net']
+            records.append(row)
+
+        df = pd.DataFrame(records).sort_values('date').reset_index(drop=True)
+        s, e = pd.to_datetime(start_date), pd.to_datetime(end_date)
+        df = df[(df['date'] >= s) & (df['date'] <= e)].reset_index(drop=True)
+        df['flow_source'] = '雪球(全球CDN·近20交易日)'
+        if len(df):
+            _record_status('雪球资金流', True, f'{len(df)}天(近20交易日), {time.time()-t0:.1f}s')
+            return df
+        _record_status('雪球资金流', False, '日期过滤后空')
+        return pd.DataFrame()
+    except Exception as ex:
+        _record_status('雪球资金流', False, f'{type(ex).__name__}: {str(ex)[:70]}')
+        return pd.DataFrame()
+
+
 def _fetch_flow_eastmoney_direct(code, start_date, end_date):
     """
-    东方财富个股资金流直连API（多镜像HTTP轮询，海外环境实测可靠）。
+    东方财富个股资金流直连API（多镜像HTTP轮询）。
     字段: f51日期 f52主力净 f53小单 f54中单 f55大单 f56超大单 f57-f61各类占比 ...
+    注意：东财 push2his 域名在美国数据中心可能被断开(RemoteDisconnected)，故仅作信源之一。
     """
     try:
         secid = _get_secid(code)
@@ -500,6 +637,7 @@ def _fetch_flow_eastmoney_direct(code, start_date, end_date):
         s, e = pd.to_datetime(start_date), pd.to_datetime(end_date)
         df = df[(df['date'] >= s) & (df['date'] <= e)].reset_index(drop=True)
         if len(df):
+            df['flow_source'] = '东方财富(5档)'
             _record_status('东财直连资金流', True,
                            f'{len(df)}天 via {host.split(".")[0]}(试{attempts}), {elapsed:.1f}s')
             return df
@@ -543,6 +681,7 @@ def _fetch_flow_akshare(code, start_date, end_date):
         mask = (df['date'] >= pd.to_datetime(start_date)) & (df['date'] <= pd.to_datetime(end_date))
         df = df[mask].sort_values('date').reset_index(drop=True)
         if len(df) > 0:
+            df['flow_source'] = 'akshare(东财口径)'
             _record_status('akshare资金流', True, f'{len(df)}天, {elapsed:.1f}s')
         else:
             _record_status('akshare资金流', False, f'过滤后空, {elapsed:.1f}s')
@@ -553,21 +692,34 @@ def _fetch_flow_akshare(code, start_date, end_date):
 
 
 def fetch_capital_flow(code, start_date, end_date):
-    """多源获取个股资金流：东财多镜像直连(首选) → akshare(兜底)"""
+    """
+    多源获取个股资金流，按可达性/质量依次降级：
+      源1 东财push2his镜像（5档完整历史，国内最优；美国被封时快速失败）
+      源2 雪球Xueqiu（全球CDN，美国服务器可达；近20交易日主力净流入+最新分档）
+      源3 akshare（兜底）
+    任一源成功即返回，结果带 flow_source 列标注口径；全失败返回空DataFrame（不阻断主流程）。
+    """
     clear_source_status()
-    # 源1：东财多镜像直连（内部已轮询，再整体重试1次）
+    # 源1：东财多镜像直连（RemoteDisconnected为即时失败，不会长时间卡住；外层只重试1次）
     try:
         df = _retry(lambda: _fetch_flow_eastmoney_direct(code, start_date, end_date),
-                    retries=2, delay=0.8)
+                    retries=1, delay=0.6)
         if len(df) > 0:
             return df
     except Exception:
         pass
-    # 源2：akshare兜底
+    # 源2：雪球（全球CDN，海外/美国可达）
+    try:
+        df = _fetch_flow_xueqiu(code, start_date, end_date)
+        if len(df) > 0:
+            return df
+    except Exception:
+        pass
+    # 源3：akshare兜底
     df = _fetch_flow_akshare(code, start_date, end_date)
     if len(df) > 0:
         return df
-    _record_status('全部资金流源', False, '2个源均失败')
+    _record_status('全部资金流源', False, '3个源均失败（东财/雪球/akshare）')
     return pd.DataFrame()
 
 
