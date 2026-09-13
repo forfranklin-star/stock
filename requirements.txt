@@ -1,0 +1,17 @@
+streamlit>=1.30.0
+plotly>=5.18.0
+flask>=2.3.0
+# akshare 仅作为兜底数据源（主数据源为东方财富纯urllib直连，不依赖它）
+# 若出现 ArrowInvalid: invalid escape sequence \u，是 pyarrow 新版正则变严导致，
+# 已在代码中捕获并自动降级；也可固定 pyarrow<15 解决
+akshare>=1.14.0
+yfinance>=0.2.30
+efinance>=0.5.0
+baostock>=0.8.8
+pandas>=2.0.0,<2.3.0
+numpy>=1.24.0
+scipy>=1.10.0
+scikit-learn>=1.3.0
+# pyarrow 版本过新会导致 akshare 内部正则报 ArrowInvalid，限制在经过验证的区间
+pyarrow>=11.0.0,<=17.0.0
+requests>=2.28.0
