@@ -28,8 +28,7 @@
 your-repo/
 ├── streamlit_app.py          # ✅ 必需：Streamlit 主入口（文件名可自定义，但需在部署时指定）
 ├── analysis.py               # ✅ 必需：核心分析逻辑模块（被 streamlit_app.py import）
-├── requirements.txt          # ✅ 必需：Python 依赖清单
-├── packages.txt              # ⭐ 推荐：系统级依赖（apt 包），用于 lxml 等编译
+├── requirements.txt          # ✅ 必需：Python 依赖清单（勿锁 pandas/pyarrow 上限）
 ├── .streamlit/
 │   └── config.toml           # ⭐ 推荐：Streamlit 主题和服务器配置
 ├── .gitignore                # ⭐ 推荐：忽略缓存、虚拟环境等
@@ -62,26 +61,27 @@ Streamlit Cloud 会执行 `streamlit run <文件名>`。默认查找 `streamlit_
 #### 3. `requirements.txt` — Python 依赖
 Streamlit Cloud 自动执行 `pip install -r requirements.txt`。
 
+> ⚠️ **重要：不要给 pandas / numpy / pyarrow 加版本上限**。Streamlit 基础镜像已自带与之匹配的版本，
+> 若写成 `pandas<2.3`、`pyarrow<=17` 会强制降级，触发 `installer returned a non-zero exit code` 部署失败。
+> pyarrow 新版可能让 akshare 报 ArrowInvalid，但本项目主数据源是东方财富纯 urllib 直连（不经过 pyarrow），
+> akshare 仅兜底且代码已容错，无需固定 pyarrow。
+
 ```
 streamlit>=1.30.0      # Web 框架
 plotly>=5.18.0         # 交互式图表（K线、折线、柱状）
-akshare>=1.12.0        # A股数据接口（免费，无需Token）
-pandas>=2.0.0           # 数据处理
-numpy>=1.24.0           # 数值计算
-scipy>=1.10.0           # 统计检验（点二列相关、t检验）
-scikit-learn>=1.3.0     # 机器学习工具
+akshare>=1.14.0        # A股数据接口（兜底，主用内置东财直连）
+yfinance>=0.2.30       # 海外备用行情源
+baostock>=0.8.8        # TCP行情备用源
+scipy>=1.10.0          # 统计检验（点二列相关、t检验）
+scikit-learn>=1.3.0    # 机器学习工具
+requests>=2.28.0
 ```
 
-#### 4. `packages.txt` — 系统依赖
-Streamlit Cloud 基于 Debian，自动执行 `apt-get install`。akshare 依赖的 `lxml` 库编译时需要以下系统包：
-
-```
-libxml2-dev
-libxslt-dev
-zlib1g-dev
-```
-
-> **注意**：如果缺少此文件，`pip install lxml` 可能因编译失败而导致部署报错。虽然 lxml 通常有预编译 wheel，但添加此文件可确保万无一失。
+#### 4. 不要使用 `packages.txt`（重要）
+**本项目不需要、也不要上传 `packages.txt`。**
+早期版本曾用它安装 `libxml2-dev` 等 apt 包，但 Streamlit Cloud 的 Debian apt 源（bullseye-security）
+经常过期，会直接导致部署失败；且 lxml 现在通过预编译 wheel 安装，无需系统编译依赖。
+如果你的仓库里已有 `packages.txt`，请删除它。
 
 #### 5. `.streamlit/config.toml` — 应用配置
 ```toml
@@ -128,9 +128,8 @@ venv/
 2. 点击 **Add file** → **Upload files**
 3. 将以下文件拖拽到上传区域：
    - `streamlit_app.py`
-   - `analysis.py`
-   - `requirements.txt`
-   - `packages.txt`
+   - `analysis.py`（以及 data_sources.py / news_analysis.py / capital_flow_analysis.py / swing_detection.py / anomaly_signal.py / learning.py 等全部 .py）
+   - `requirements.txt`（不要上传 packages.txt）
    - `.streamlit/config.toml`（需先创建 `.streamlit` 文件夹：点击 Add file → Create new file，文件名输入 `.streamlit/config.toml`）
 4. 点击 **Commit changes**
 
@@ -178,9 +177,8 @@ git push -u origin main
 
 Streamlit Cloud 会自动执行以下操作：
 1. 从 GitHub 拉取代码
-2. 安装系统依赖（`packages.txt`）
-3. 安装 Python 依赖（`requirements.txt`）— 这一步通常需要 2-5 分钟
-4. 启动 Streamlit 应用
+2. 安装 Python 依赖（`requirements.txt`）— 这一步通常需要 2-5 分钟（本项目无 packages.txt）
+3. 启动 Streamlit 应用
 
 部署过程中可以看到实时日志。如果一切正常，页面会自动跳转到你的应用。
 
@@ -216,14 +214,18 @@ Streamlit Cloud 支持 **自动重新部署**：
 
 ## 五、常见问题与排查
 
-### 5.1 部署失败：`pip install` 报错
+### 5.1 部署失败：`installer returned a non-zero exit code`
 
-**现象**：日志中出现 `ERROR: Could not build wheels for lxml` 或类似编译错误。
+**现象**：依赖装到一半（如 rich/pygments）后报 `Error during processing dependencies`。
 
-**解决**：
-- 确认 `packages.txt` 存在且包含 `libxml2-dev`、`libxslt-dev`
-- 在应用设置中将 Python 版本降级到 3.10
-- 检查 `requirements.txt` 中版本号是否过新，适当降低版本要求
+**解决**（按优先级）：
+- **删掉 `packages.txt`**：它会触发 apt 源（bullseye-security）过期错误，本项目不需要任何 apt 包
+- **去掉 requirements.txt 中 pandas/numpy/pyarrow 的版本上限**：如 `pandas<2.3`、`pyarrow<=17` 会强制降级基础镜像自带包而冲突；只保留下限（`>=`）
+- 在 Streamlit Cloud 应用菜单点 **Reboot / Clear cache and restart**
+
+### 5.2 运行时报 `ArrowInvalid: invalid escape sequence \u`
+
+这是新版 pyarrow 正则更严、与 akshare 内部正则不兼容所致。本项目主数据源为东方财富纯 urllib 直连（不经过 pyarrow），akshare 仅兜底且已 try/except 容错，出现该提示可忽略，不影响新闻/资金流获取。
 
 ### 5.2 应用启动后报错：`ModuleNotFoundError`
 
@@ -337,21 +339,21 @@ streamlit run streamlit_app.py
 | # | 文件名 | 必需 | 作用 |
 |---|--------|------|------|
 | 1 | `streamlit_app.py` | ✅ 必需 | 应用主入口 |
-| 2 | `analysis.py` | ✅ 必需 | 分析逻辑模块 |
-| 3 | `requirements.txt` | ✅ 必需 | Python依赖 |
-| 4 | `packages.txt` | ⭐ 推荐 | 系统依赖 |
-| 5 | `.streamlit/config.toml` | ⭐ 推荐 | 主题配置 |
-| 6 | `.gitignore` | ⭐ 推荐 | 忽略缓存文件 |
-| 7 | `README.md` | 可选 | 项目说明 |
+| 2 | `analysis.py` 等全部 .py | ✅ 必需 | 分析逻辑与数据源模块 |
+| 3 | `requirements.txt` | ✅ 必需 | Python依赖（勿锁 pandas/pyarrow 上限） |
+| 4 | `.streamlit/config.toml` | ⭐ 推荐 | 主题配置 |
+| 5 | `.gitignore` | ⭐ 推荐 | 忽略缓存文件 |
+| 6 | `README.md` | 可选 | 项目说明 |
+| — | ~~`packages.txt`~~ | ❌ 不要 | 会触发 apt 源过期，本项目不需要 |
 
 ---
 
 ## 九、部署检查清单
 
 - [ ] GitHub 仓库已创建且为 Public
-- [ ] 所有必需文件已上传到仓库根目录
-- [ ] `requirements.txt` 包含 streamlit、plotly、akshare、pandas、numpy、scipy
-- [ ] `packages.txt` 包含 libxml2-dev、libxslt-dev
+- [ ] 所有必需文件已上传到仓库根目录（全部 .py + requirements.txt + .streamlit/config.toml）
+- [ ] **仓库中没有 `packages.txt`**（有则删除）
+- [ ] `requirements.txt` 只对依赖设下限（>=），未锁定 pandas/numpy/pyarrow 上限
 - [ ] `streamlit_app.py` 中 `import analysis` 路径正确
 - [ ] 本地运行测试通过
 - [ ] Streamlit Cloud 已授权 GitHub 访问

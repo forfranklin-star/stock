@@ -21,6 +21,8 @@
 """
 import time
 import json
+import gzip
+import zlib
 import ssl
 import socket
 import urllib.request
@@ -28,6 +30,46 @@ import urllib.parse
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+
+# 兼容：pandas 2.2+ 默认可能用 pyarrow 字符串后端，会让 akshare 内部正则
+# 报 "ArrowInvalid: Invalid regular expression: invalid escape sequence \u"。
+# 关闭字符串的 pyarrow 推断，回退到 Python/object 字符串后端（正则走 re 模块，更宽松）。
+try:
+    pd.options.future.infer_string = False
+except Exception:
+    pass
+try:
+    pd.options.mode.string_storage = 'python'
+except Exception:
+    pass
+
+
+def _decode_response(raw, encoding='utf-8'):
+    """
+    解码HTTP响应bytes，自动处理 gzip/deflate 压缩。
+    东财服务器偶尔返回gzip（魔数0x1f 0x8b），urllib不会自动解压，需手动处理。
+    """
+    if raw is None:
+        return ''
+    if isinstance(raw, str):
+        return raw
+    # gzip 魔数 0x1f 0x8b
+    if len(raw) >= 2 and raw[:2] == b'\x1f\x8b':
+        try:
+            raw = gzip.decompress(raw)
+        except Exception:
+            pass
+    else:
+        # zlib/deflate
+        try:
+            raw = zlib.decompress(raw)
+        except Exception:
+            # 可能是无zlib头的deflate，或本身就是明文
+            try:
+                raw = zlib.decompress(raw, -zlib.MAX_WBITS)
+            except Exception:
+                pass
+    return raw.decode(encoding, errors='ignore')
 
 # 不校验SSL（部分海外环境证书链有问题）
 _SSL_CTX = ssl.create_default_context()
@@ -73,12 +115,13 @@ def get_source_status_list():
 
 
 def _http_get(url, timeout=10, headers=None, retries=1):
-    """统一HTTP GET请求（SSL不校验，支持简单重试），返回bytes"""
+    """统一HTTP GET请求（SSL不校验，自动解压gzip/deflate，支持简单重试），返回解压后的bytes"""
     default_headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
                       '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': '*/*',
         'Accept-Language': 'zh-CN,zh;q=0.9',
+        'Accept-Encoding': 'gzip, deflate',
     }
     if headers:
         default_headers.update(headers)
@@ -87,7 +130,17 @@ def _http_get(url, timeout=10, headers=None, retries=1):
         try:
             req = urllib.request.Request(url, headers=default_headers)
             with urllib.request.urlopen(req, timeout=timeout, context=_SSL_CTX) as resp:
-                return resp.read()
+                raw = resp.read()
+                enc = (resp.headers.get('Content-Encoding') or '').lower()
+                # 按响应头解压；若无头但魔数是gzip也解压
+                if enc == 'gzip' or raw[:2] == b'\x1f\x8b':
+                    raw = gzip.decompress(raw)
+                elif enc == 'deflate':
+                    try:
+                        raw = zlib.decompress(raw)
+                    except Exception:
+                        raw = zlib.decompress(raw, -zlib.MAX_WBITS)
+                return raw
         except Exception as e:
             last_err = e
             if attempt < retries:
@@ -366,6 +419,7 @@ def _request_mirrors_json(mirrors, path_suffix, protocol='http', timeout=6, roun
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
                       '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'application/json, text/plain, */*',
+        'Accept-Encoding': 'gzip, deflate',
         'Referer': 'http://data.eastmoney.com/',
         'Connection': 'close',
     }
@@ -379,7 +433,16 @@ def _request_mirrors_json(mirrors, path_suffix, protocol='http', timeout=6, roun
                 url = f"{protocol}://{host}{path_suffix}"
                 req = urllib.request.Request(url, headers=headers)
                 with urllib.request.urlopen(req, timeout=timeout, context=_SSL_CTX) as resp:
-                    text = resp.read().decode('utf-8', errors='ignore')
+                    raw = resp.read()
+                    enc = (resp.headers.get('Content-Encoding') or '').lower()
+                    if enc == 'gzip' or raw[:2] == b'\x1f\x8b':
+                        raw = gzip.decompress(raw)
+                    elif enc == 'deflate':
+                        try:
+                            raw = zlib.decompress(raw)
+                        except Exception:
+                            raw = zlib.decompress(raw, -zlib.MAX_WBITS)
+                    text = raw.decode('utf-8', errors='ignore')
                     data = json.loads(text)
                     if data is not None:
                         return data, host, attempts

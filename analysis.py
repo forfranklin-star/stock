@@ -26,6 +26,16 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
+# 兼容 pandas 2.2+ pyarrow 字符串后端，避免 akshare 内部正则 ArrowInvalid
+try:
+    pd.options.future.infer_string = False
+except Exception:
+    pass
+try:
+    pd.options.mode.string_storage = 'python'
+except Exception:
+    pass
+
 warnings.filterwarnings('ignore')
 
 # ============================================================
