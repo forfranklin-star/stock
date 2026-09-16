@@ -14,12 +14,18 @@ jobs:
     steps:
       - name: 访问应用（跟随重定向，触发唤醒）
         run: |
+          # 关闭 errexit，确保 curl 因重定向/认证失败时不会中断整个 job
+          set +e
+
+          APP_URL="https://stock-han.streamlit.app/"
+
           echo "=== 第一次请求：触发唤醒 ==="
           curl -L -s -o /dev/null \
             -w "HTTP状态: %{http_code}\n最终地址: %{url_effective}\n总耗时: %{time_total}s\n" \
             --max-time 90 \
-            --retry 2 --retry-delay 5 \
-            "https://stock-han.streamlit.app/"
+            --max-redirs 10 \
+            "$APP_URL"
+          echo "curl退出码: $?"
 
           echo ""
           echo "=== 等待应用启动（15秒）==="
@@ -30,4 +36,9 @@ jobs:
           curl -L -s -o /dev/null \
             -w "HTTP状态: %{http_code}\n最终地址: %{url_effective}\n总耗时: %{time_total}s\n" \
             --max-time 60 \
-            "https://stock-han.streamlit.app/"
+            --max-redirs 10 \
+            "$APP_URL"
+          echo "curl退出码: $?"
+
+          echo ""
+          echo "=== 完成（唤醒请求已发出）==="
